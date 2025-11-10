@@ -9,19 +9,13 @@
 #include <chrono>
 
 #include <QApplication>
-#include <QMainWindow>
-#include <QVBoxLayout>
-#include <QWidget>
 #include <QThread>
-#include <QColor>
-#include <QPen>
-#include <QDir>
-#include <QDateTime>
-#include <QDebug>
-#include <QFont>
-#include <qcustomplot.h>
+#include <QString>
 
 #include <openarm/can/socket/openarm.hpp>
+
+#include "torque_plotting.hpp"
+#include "torque_export.hpp"
 
 namespace oa  = openarm;
 namespace oacs = openarm::can::socket;
@@ -274,39 +268,7 @@ static SequenceResult run_left_sequence(oacs::OpenArm& openarm,
   return R;
 }
 
-// Worker thread to collect torque data from motors
-class MotorDataCollector : public QThread {
-    Q_OBJECT
-
-public:
-    MotorDataCollector(oacs::OpenArm* openarm) : openarm_(openarm) {}
-
-signals:
-    void torqueDataReceived(int motorIndex, double time, double torque);
-
-protected:
-    void run() override {
-        auto start_time = std::chrono::steady_clock::now();
-        
-        while (!isInterruptionRequested()) {
-            openarm_->recv_all();
-            auto motors = openarm_->get_arm().get_motors();
-            
-            auto now = std::chrono::steady_clock::now();
-            double elapsed = std::chrono::duration<double>(now - start_time).count();
-            
-            for (size_t i = 0; i < motors.size(); ++i) {
-                double torque = motors[i].get_torque();
-                emit torqueDataReceived(static_cast<int>(i), elapsed, torque);
-            }
-            
-            std::this_thread::sleep_for(std::chrono::milliseconds(10)); // ~100 Hz
-        }
-    }
-
-private:
-    oacs::OpenArm* openarm_;
-};
+// MotorDataCollector and TorquePlotWindow are now in torque_plotting.cpp
 
 // Calibration worker thread
 class CalibrationWorker : public QThread {
@@ -409,170 +371,13 @@ private:
     std::string arm_side_;
 };
 
-// Main window with torque plots
-class TorquePlotWindow : public QMainWindow {
-    Q_OBJECT
-
-public:
-    TorquePlotWindow(oacs::OpenArm* openarm, QWidget* parent = nullptr)
-        : QMainWindow(parent), openarm_(openarm), collector_(nullptr) {
-        setupUI();
-        setupDataCollector();
-    }
-
-    ~TorquePlotWindow() {
-        if (collector_) {
-            collector_->requestInterruption();
-            collector_->wait();
-            delete collector_;
-        }
-    }
-
-    void saveAllPlotsToPdf(const QString& basePath = QString()) {
-        QString path = basePath.isEmpty() ? "graphs" : basePath;
-        
-        // Create graphs directory if it doesn't exist
-        QDir dir;
-        if (!dir.exists(path)) {
-            if (!dir.mkpath(path)) {
-                qWarning() << "Failed to create directory:" << path;
-                return;
-            }
-        }
-
-        // Generate timestamp for filename
-        QString timestamp = QDateTime::currentDateTime().toString("yyyyMMdd_hhmmss");
-        
-        // Save each plot as a separate PDF
-        for (int i = 0; i < static_cast<int>(plots_.size()); ++i) {
-            QString filename = QString("%1/motor_%2_torque_%3.pdf")
-                                  .arg(path)
-                                  .arg(i + 1)
-                                  .arg(timestamp);
-            
-            if (plots_[i]->savePdf(filename, 1200, 400)) {
-                qDebug() << "Saved plot to:" << filename;
-            } else {
-                qWarning() << "Failed to save plot to:" << filename;
-            }
-        }
-        
-        // Also save a combined plot (all motors in one PDF)
-        QString combinedFilename = QString("%1/all_motors_torque_%2.pdf")
-                                      .arg(path)
-                                      .arg(timestamp);
-        saveCombinedPlot(combinedFilename);
-    }
-
-private:
-    void saveCombinedPlot(const QString& filename) {
-        // Create a temporary plot with all motors
-        QCustomPlot* combinedPlot = new QCustomPlot;
-        
-        // Add all graphs to the combined plot
-        for (int i = 0; i < static_cast<int>(plots_.size()); ++i) {
-            combinedPlot->addGraph();
-            QColor color = QColor::fromHsv(i * 360 / 7, 255, 255);
-            combinedPlot->graph(i)->setPen(QPen(color, 2));
-            combinedPlot->graph(i)->setName(QString("Motor %1").arg(i + 1));
-            
-            // Copy data from individual plot
-            auto sourceData = plots_[i]->graph(0)->data();
-            for (auto it = sourceData->begin(); it != sourceData->end(); ++it) {
-                combinedPlot->graph(i)->addData(it->key, it->value);
-            }
-        }
-        
-        // Configure axes
-        combinedPlot->xAxis->setLabel("Time (s)");
-        combinedPlot->yAxis->setLabel("Torque (Nm)");
-        combinedPlot->legend->setVisible(true);
-        combinedPlot->legend->setFont(QFont("Helvetica", 9));
-        
-        // Set axis ranges to fit all data
-        combinedPlot->rescaleAxes();
-        
-        // Save to PDF
-        if (combinedPlot->savePdf(filename, 1200, 800)) {
-            qDebug() << "Saved combined plot to:" << filename;
-        } else {
-            qWarning() << "Failed to save combined plot to:" << filename;
-        }
-        
-        delete combinedPlot;
-    }
-
-private slots:
-    void onTorqueData(int motorIndex, double time, double torque) {
-        if (motorIndex < 0 || motorIndex >= static_cast<int>(plots_.size())) {
-            return;
-        }
-
-        QCustomPlot* plot = plots_[motorIndex];
-        plot->graph(0)->addData(time, torque);
-
-        // Remove old data beyond 10 seconds
-        plot->graph(0)->data()->removeBefore(time - 10.0);
-
-        // Update X-axis range to show last 10 seconds
-        plot->xAxis->setRange(time - 10.0, time);
-
-        // Auto-rescale Y-axis
-        plot->graph(0)->rescaleValueAxis();
-
-        // Replot
-        plot->replot();
-    }
-
-private:
-    void setupUI() {
-        auto* centralWidget = new QWidget;
-        auto* layout = new QVBoxLayout(centralWidget);
-
-        // Create a plot for each motor (7 motors)
-        for (int i = 0; i < 7; ++i) {
-            auto* plot = new QCustomPlot;
-            plot->addGraph();
-            
-            // Set distinct color for each motor using HSV
-            QColor color = QColor::fromHsv(i * 360 / 7, 255, 255);
-            plot->graph(0)->setPen(QPen(color, 2));
-            
-            // Configure axes
-            plot->xAxis->setLabel("Time (s)");
-            plot->yAxis->setLabel(QString("Motor %1 Torque (Nm)").arg(i + 1));
-            
-            // Enable zoom and pan
-            plot->setInteractions(QCP::iRangeDrag | QCP::iRangeZoom);
-            
-            // Set initial X-axis range (will be updated dynamically)
-            plot->xAxis->setRange(0, 10);
-            
-            plots_.push_back(plot);
-            layout->addWidget(plot);
-        }
-
-        setCentralWidget(centralWidget);
-        setWindowTitle("Zero Position Calibration - Torque Monitor");
-        resize(1200, 1000);
-    }
-
-    void setupDataCollector() {
-        collector_ = new MotorDataCollector(openarm_);
-        connect(collector_, &MotorDataCollector::torqueDataReceived,
-                this, &TorquePlotWindow::onTorqueData);
-        collector_->start();
-    }
-
-    oacs::OpenArm* openarm_;
-    MotorDataCollector* collector_;
-    std::vector<QCustomPlot*> plots_;
-};
+// TorquePlotWindow is now in torque_plotting.cpp
 
 struct Args {
   std::string canport = "can0";
   std::string arm_side = "right_arm"; // or "left_arm"
   bool show_torques = false;
+  std::string export_formats = "all"; // "pdf", "png", "csv", "all", or comma-separated like "pdf,png"
 };
 
 static bool parse_args(int argc, char** argv, Args& out) {
@@ -584,8 +389,12 @@ static bool parse_args(int argc, char** argv, Args& out) {
       out.arm_side = argv[++i];
     } else if (a == "--show-torques") {
       out.show_torques = true;
+    } else if (a == "--export-format" && i + 1 < argc) {
+      out.export_formats = argv[++i];
     } else if (a == "-h" || a == "--help") {
-      std::cout << "usage: " << argv[0] << " [--canport CANPORT] [--arm-side {right_arm,left_arm}] [--show-torques]\n";
+      std::cout << "usage: " << argv[0] << " [--canport CANPORT] [--arm-side {right_arm,left_arm}] [--show-torques] [--export-format {pdf,png,csv,all}]\n";
+      std::cout << "  --export-format: Comma-separated list or 'all' (default: all)\n";
+      std::cout << "                   Examples: 'pdf', 'png', 'csv', 'pdf,png', 'all'\n";
       return false;
     } else {
       std::cerr << "unrecognized argument: " << a << "\n";
@@ -637,12 +446,12 @@ int main(int argc, char** argv) {
 
       CalibrationWorker* worker = new CalibrationWorker(&openarm, args.arm_side);
       QObject::connect(worker, &CalibrationWorker::calibrationFinished,
-                       app, [app, &window](int result) {
+                       app, [app, &window, args](int result) {
                          std::cout << "[INFO] Calibration completed.\n";
                          
-                         // Save all plots to PDF before quitting
-                         std::cout << "[INFO] Saving torque graphs to PDF...\n";
-                         window.saveAllPlotsToPdf("graphs");
+                         // Save all plots with specified format before quitting
+                         std::cout << "[INFO] Saving torque graphs...\n";
+                         window.saveAllPlots("graphs", QString::fromStdString(args.export_formats));
                          std::cout << "[INFO] Graphs saved to graphs/ directory.\n";
                          
                          if (result == 0) {
@@ -650,12 +459,12 @@ int main(int argc, char** argv) {
                          }
                        });
       QObject::connect(worker, &CalibrationWorker::calibrationError,
-                       app, [app, &window](const QString& error) {
+                       app, [app, &window, args](const QString& error) {
                          std::cerr << "[ERROR] " << error.toStdString() << "\n";
                          
                          // Save plots even on error (might be useful for debugging)
-                         std::cout << "[INFO] Saving torque graphs to PDF before exit...\n";
-                         window.saveAllPlotsToPdf("graphs");
+                         std::cout << "[INFO] Saving torque graphs before exit...\n";
+                         window.saveAllPlots("graphs", QString::fromStdString(args.export_formats));
                          
                          app->quit();
                        });

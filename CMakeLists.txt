@@ -163,7 +163,11 @@ target_link_libraries(torque-graph
 install(TARGETS torque-graph DESTINATION ${OPENARM_CAN_LIBEXEC_DIR})
 
 # Zero position calibration with optional torque graphing
-add_executable(zero-position-calibration setup/zero_position_calibration.cpp)
+add_executable(zero-position-calibration 
+  setup/zero_position_calibration.cpp
+  setup/torque_plotting.cpp
+  setup/torque_export.cpp
+)
 target_link_libraries(zero-position-calibration
   Qt6::Core
   Qt6::Widgets
