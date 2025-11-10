@@ -19,6 +19,9 @@ project(openarm_can VERSION 1.1.0)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Enable Qt MOC processing
+set(CMAKE_AUTOMOC ON)
+
 if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
   add_compile_options(-Wall -Wextra -Wpedantic)
 endif()
@@ -136,6 +139,38 @@ install(PROGRAMS setup/change_baudrate.py setup/configure_socketcan.sh
 
 add_executable(openarm-diagnosis setup/openarm_can_diagnosis.cpp)
 target_link_libraries(openarm-diagnosis openarm_can)
+
+# Qt6 and QCustomPlot for torque graphing
+find_package(Qt6 REQUIRED COMPONENTS Core Widgets PrintSupport)
+
+# QCustomPlot library
+add_library(qcustomplot STATIC
+  third_party/qcustomplot/qcustomplot.cpp
+)
+target_include_directories(qcustomplot PUBLIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/third_party/qcustomplot
+)
+target_link_libraries(qcustomplot Qt6::Core Qt6::Widgets Qt6::PrintSupport)
+
+# Torque graphing executable
+add_executable(torque-graph setup/torque_graph.cpp)
+target_link_libraries(torque-graph
+  Qt6::Core
+  Qt6::Widgets
+  qcustomplot
+  openarm_can
+)
+install(TARGETS torque-graph DESTINATION ${OPENARM_CAN_LIBEXEC_DIR})
+
+# Zero position calibration with optional torque graphing
+add_executable(zero-position-calibration setup/zero_position_calibration.cpp)
+target_link_libraries(zero-position-calibration
+  Qt6::Core
+  Qt6::Widgets
+  qcustomplot
+  openarm_can
+)
+install(TARGETS zero-position-calibration DESTINATION ${OPENARM_CAN_LIBEXEC_DIR})
 
 # Add tests
 if(BUILD_TESTING)
